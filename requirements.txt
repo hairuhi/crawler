@@ -1,0 +1,8 @@
+requests
+beautifulsoup4
+playwright
+playwright-stealth
+python-dotenv
+googletrans==4.0.0-rc1
+fastapi
+uvicorn

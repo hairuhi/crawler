@@ -1,0 +1,11 @@
+.env
+data/
+**/__pycache__/
+**/*.pyc
+.vscode/
+.idea/
+
+# 기존 개별 레포지토리 폴더 제외 (통합 폴더만 업로드)
+etoland-crawler-telegram/
+avdbs-t50/
+ZDNET_JAPAN/
