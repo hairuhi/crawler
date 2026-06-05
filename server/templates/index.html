@@ -984,14 +984,15 @@
           <table>
             <thead>
               <tr>
-                <th style="width: 150px;">크롤러</th>
+                <th style="width: 120px;">크롤러</th>
                 <th>게시물 제목 / 링크</th>
-                <th style="width: 200px;">전송 시각 (로컬)</th>
+                <th style="width: 180px;">전송 시각 (로컬)</th>
+                <th style="width: 100px; text-align: center;">AI 요약</th>
               </tr>
             </thead>
             <tbody id="history-body">
               <tr>
-                <td colspan="3" style="text-align: center; color: var(--text-muted); padding: 40px;">전송 기록 로딩 중...</td>
+                <td colspan="4" style="text-align: center; color: var(--text-muted); padding: 40px;">전송 기록 로딩 중...</td>
               </tr>
             </tbody>
           </table>
@@ -1050,6 +1051,23 @@
           <div class="form-group">
             <label for="KOREA_AI_URL">지디넷 코리아 AI뉴스 주소 (KOREA_AI_URL)</label>
             <input type="text" id="KOREA_AI_URL" placeholder="https://zdnet.co.kr/newskey/?lstcode=%EC%9D%B8%EA%B3%B5%EC%A7%80%EB%8A%A5">
+          </div>
+        </div>
+
+        <!-- Gemini API 설정 -->
+        <div class="form-section" style="grid-column: span 2;">
+          <h3><i class="fa-solid fa-sparkles" style="color: var(--color-accent);"></i>AI 요약 환경 설정 (Gemini API)</h3>
+          <div class="form-group">
+            <label for="GEMINI_API_KEY">Gemini API Key (GEMINI_API_KEY)</label>
+            <input type="password" id="GEMINI_API_KEY" placeholder="Google Gemini API Key를 입력하세요 (예: AIzaSy...)">
+          </div>
+          <div class="form-group">
+            <label for="GEMINI_MODEL">Gemini 모델 (GEMINI_MODEL)</label>
+            <select class="select-dropdown" id="GEMINI_MODEL" style="width: 100%; box-sizing: border-box;">
+              <option value="gemini-1.5-flash">gemini-1.5-flash (추천: 빠른 속도, 저렴한 비용)</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash (최신 고속 플래시 모델)</option>
+              <option value="gemini-1.5-pro">gemini-1.5-pro (고성능 추론 모델)</option>
+            </select>
           </div>
         </div>
       </div>
@@ -1272,6 +1290,8 @@
         document.getElementById('AVDBS_PW').value = data.AVDBS_PW;
         document.getElementById('JAPAN_SOFTWARE_URL').value = data.JAPAN_SOFTWARE_URL;
         document.getElementById('KOREA_AI_URL').value = data.KOREA_AI_URL;
+        document.getElementById('GEMINI_API_KEY').value = data.GEMINI_API_KEY || '';
+        document.getElementById('GEMINI_MODEL').value = data.GEMINI_MODEL || 'gemini-1.5-flash';
       } catch (e) {
         showToast('로컬 설정 파일 로드 실패', true);
       }
@@ -1287,7 +1307,9 @@
         JAPAN_SOFTWARE_URL: document.getElementById('JAPAN_SOFTWARE_URL').value,
         KOREA_AI_URL: document.getElementById('KOREA_AI_URL').value,
         SCHEDULER_ENABLED: document.getElementById('scheduler-switch').checked ? "1" : "0",
-        SCHEDULER_INTERVAL_MINUTES: document.getElementById('scheduler-interval').value
+        SCHEDULER_INTERVAL_MINUTES: document.getElementById('scheduler-interval').value,
+        GEMINI_API_KEY: document.getElementById('GEMINI_API_KEY').value,
+        GEMINI_MODEL: document.getElementById('GEMINI_MODEL').value
       };
 
       try {
@@ -1343,7 +1365,7 @@
         const tbody = document.getElementById('history-body');
         
         if (list.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted); padding: 40px;">최근 전송된 이력이 없습니다.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 40px;">최근 전송된 이력이 없습니다.</td></tr>';
           return;
         }
 
@@ -1364,17 +1386,25 @@
             titleHtml = `<a class="history-link" href="${item.key}" target="_blank">${item.title}</a>`;
           }
 
+          // Escape single quotes for inline JS attributes
+          const safeTitle = item.title.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td><span class="source-tag ${tagClass}">${item.crawler}</span></td>
             <td>${titleHtml}</td>
             <td style="color: var(--text-muted); font-size: 0.85rem;">${timeVal}</td>
+            <td style="text-align: center;">
+              <button class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.8rem; border-radius: 8px; display: inline-flex; align-items: center; gap: 4px;" onclick="summarizePost('${item.crawler}', '${item.key}', '${safeTitle}')">
+                <i class="fa-solid fa-sparkles" style="color: var(--color-accent);"></i> 요약
+              </button>
+            </td>
           `;
           tbody.appendChild(tr);
         });
 
       } catch (e) {
-        document.getElementById('history-body').innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--color-danger); padding: 40px;">이력을 가져오지 못했습니다.</td></tr>';
+        document.getElementById('history-body').innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--color-danger); padding: 40px;">이력을 가져오지 못했습니다.</td></tr>';
       }
     }
 
@@ -1385,9 +1415,6 @@
         fetchStatus();
       } else if (document.getElementById('logs').classList.contains('active')) {
         fetchLogs();
-      }
-    }, 10000);
-
       }
     }, 10000);
 
@@ -1533,10 +1560,93 @@
       }
     }
 
+    // 13. AI 요약 호출 및 모달 인터랙션
+    async function summarizePost(crawler, key, title) {
+      const modal = document.getElementById('summary-modal');
+      const modalTitle = document.getElementById('modal-post-title');
+      const modalContent = document.getElementById('modal-summary-content');
+      
+      modalTitle.textContent = title;
+      modalContent.innerHTML = `
+        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; gap: 12px;">
+          <i class="fa-solid fa-spinner fa-spin" style="font-size: 2rem; color: var(--color-primary);"></i>
+          <span style="color: var(--text-muted); font-size: 0.9rem;">웹페이지 분석 및 AI 요약 중입니다...</span>
+        </div>
+      `;
+      modal.style.display = 'flex';
+      
+      try {
+        const r = await fetch('/api/summarize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ crawler, key, title })
+        });
+        
+        if (!r.ok) {
+          const err = await r.json();
+          throw new Error(err.detail || '요약 도중 알 수 없는 에러가 발생했습니다.');
+        }
+        
+        const data = await r.json();
+        modalContent.textContent = data.summary;
+      } catch (e) {
+        modalContent.innerHTML = `
+          <div style="color: var(--color-danger); padding: 10px; display: flex; align-items: center; gap: 8px;">
+            <i class="fa-solid fa-circle-exclamation"></i>
+            <span>요약 실패: ${e.message}</span>
+          </div>
+        `;
+      }
+    }
+    
+    function closeSummaryModal() {
+      document.getElementById('summary-modal').style.display = 'none';
+    }
+    
+    function copySummaryText() {
+      const text = document.getElementById('modal-summary-content').textContent;
+      const copyBtn = document.getElementById('modal-copy-btn');
+      
+      navigator.clipboard.writeText(text).then(() => {
+        const origHtml = copyBtn.innerHTML;
+        copyBtn.innerHTML = `<i class="fa-solid fa-check"></i> 복사 완료!`;
+        setTimeout(() => {
+          copyBtn.innerHTML = origHtml;
+        }, 1500);
+      }).catch(err => {
+        showToast('텍스트 복사 실패', true);
+      });
+    }
+
     // 초기 구동 실행
     window.onload = function() {
       fetchStatus();
     }
   </script>
+
+  <!-- 요약 결과 모달 -->
+  <div id="summary-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); z-index: 2000; align-items: center; justify-content: center;">
+    <div class="glass-card" style="width: 90%; max-width: 600px; padding: 28px; max-height: 80%; overflow-y: auto; position: relative;">
+      <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; border-bottom: 1px solid var(--card-border); padding-bottom: 12px;">
+        <h3 style="font-family: var(--font-title); font-size: 1.25rem; font-weight: 600; display: flex; align-items: center; gap: 10px;">
+          <i class="fa-solid fa-sparkles" style="color: var(--color-accent); animation: pulse 1.5s infinite;"></i> AI 본문 요약 결과
+        </h3>
+        <button onclick="closeSummaryModal()" style="background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1.2rem; transition: color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='var(--text-muted)'">
+          <i class="fa-solid fa-times"></i>
+        </button>
+      </div>
+      <div id="modal-post-title" style="font-weight: 700; font-size: 1.05rem; margin-bottom: 16px; color: var(--color-primary); line-height: 1.4;"></div>
+      <div id="modal-summary-content" style="font-size: 0.95rem; line-height: 1.7; white-space: pre-wrap; color: var(--text-main); min-height: 100px; padding: 10px 0;">
+        <!-- 내용 요약 또는 로딩바 -->
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; border-top: 1px solid var(--card-border); padding-top: 16px;">
+        <button class="btn btn-secondary" onclick="copySummaryText()" id="modal-copy-btn">
+          <i class="fa-solid fa-copy"></i> 요약본 복사
+        </button>
+        <button class="btn btn-primary" onclick="closeSummaryModal()">닫기</button>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>

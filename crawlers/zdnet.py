@@ -35,7 +35,7 @@ class ZdnetCrawler(BaseCrawler):
         cutoff = now_local - timedelta(hours=24)
         return cutoff <= dt <= now_local
 
-    def translate_title_ja_to_ko(self, text_ja: str) -> str | None:
+    def translate_title_ja_to_ko(self, text_ja: str):
         if not text_ja or not self.translator:
             return None
         try:
@@ -74,7 +74,7 @@ class ZdnetCrawler(BaseCrawler):
                 })
         return articles
 
-    def fetch_published_at_jp(self, article_url: str) -> datetime | None:
+    def fetch_published_at_jp(self, article_url: str):
         try:
             html = self.fetch_html(article_url)
             soup = BeautifulSoup(html, "html.parser")
@@ -136,7 +136,7 @@ class ZdnetCrawler(BaseCrawler):
                 })
         return articles
 
-    def fetch_published_at_kr(self, article_url: str) -> datetime | None:
+    def fetch_published_at_kr(self, article_url: str):
         try:
             html = self.fetch_html(article_url)
             soup = BeautifulSoup(html, "html.parser")

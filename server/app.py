@@ -1,8 +1,11 @@
 import os
+import re
 import json
 import logging
 import asyncio
 import subprocess
+import requests
+from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -79,6 +82,8 @@ class ConfigModel(BaseModel):
     KOREA_AI_URL: str = ""
     SCHEDULER_ENABLED: str = "0"
     SCHEDULER_INTERVAL_MINUTES: str = "30"
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-1.5-flash"
 
 # --- 비동기 크롤러 실행기 ---
 async def run_crawler_async(name: str):
@@ -269,7 +274,9 @@ def get_config():
         "JAPAN_SOFTWARE_URL": os.getenv("JAPAN_SOFTWARE_URL", "https://japan.zdnet.com/software/"),
         "KOREA_AI_URL": os.getenv("KOREA_AI_URL", "https://zdnet.co.kr/newskey/?lstcode=%EC%9D%B8%EA%B3%B5%EC%A7%80%EB%8A%A5"),
         "SCHEDULER_ENABLED": os.getenv("SCHEDULER_ENABLED", "0"),
-        "SCHEDULER_INTERVAL_MINUTES": os.getenv("SCHEDULER_INTERVAL_MINUTES", "30")
+        "SCHEDULER_INTERVAL_MINUTES": os.getenv("SCHEDULER_INTERVAL_MINUTES", "30"),
+        "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY", ""),
+        "GEMINI_MODEL": os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
     }
 
 @app.post("/api/config")
@@ -284,6 +291,8 @@ def save_config(config: ConfigModel):
         set_key(str(ENV_PATH), "KOREA_AI_URL", config.KOREA_AI_URL)
         set_key(str(ENV_PATH), "SCHEDULER_ENABLED", config.SCHEDULER_ENABLED)
         set_key(str(ENV_PATH), "SCHEDULER_INTERVAL_MINUTES", config.SCHEDULER_INTERVAL_MINUTES)
+        set_key(str(ENV_PATH), "GEMINI_API_KEY", config.GEMINI_API_KEY)
+        set_key(str(ENV_PATH), "GEMINI_MODEL", config.GEMINI_MODEL)
         
         # 임시 환경 변수 재정리
         load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -460,3 +469,150 @@ def get_history():
 
     history.sort(key=get_time_key, reverse=True)
     return history[:100]  # 최근 100개만 UI로 송출
+
+# --- AI 요약 관련 헬퍼 및 엔드포인트 ---
+
+def extract_text_from_url(url: str) -> str:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    }
+    resp = requests.get(url, headers=headers, timeout=20)
+    resp.raise_for_status()
+    
+    if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "ansi_x3.4-1968"):
+        resp.encoding = resp.apparent_encoding or "utf-8"
+        
+    soup = BeautifulSoup(resp.text, "html.parser")
+    
+    # 불필요한 태그 제거
+    for element in soup(["script", "style", "noscript", "iframe", "header", "footer", "nav", "aside"]):
+        element.extract()
+        
+    # 주요 본문 선택자 매칭 시도
+    selectors = [
+        "#bo_v_con", ".bo_v_con", ".news_body", "#news_content", 
+        "#articleBody", ".view_content", "article", ".topicdesc", ".post-content", ".content"
+    ]
+    
+    main_content = None
+    for sel in selectors:
+        main_content = soup.select_one(sel)
+        if main_content:
+            break
+            
+    if not main_content:
+        main_content = soup.body or soup
+        
+    paragraphs = main_content.find_all(["p", "div", "span"]) if hasattr(main_content, "find_all") else []
+    text_list = []
+    if paragraphs:
+        for p in paragraphs:
+            p_text = p.get_text(strip=True)
+            if len(p_text) > 20 and p_text not in text_list:
+                text_list.append(p_text)
+                
+    text = "\n".join(text_list)
+    if not text.strip():
+        text = main_content.get_text(separator="\n", strip=True)
+        
+    # 공백 줄이고 개행 정리
+    text = re.sub(r'\n+', '\n', text)
+    text = re.sub(r' +', ' ', text)
+    
+    return text[:4000]
+
+class SummarizeRequest(BaseModel):
+    crawler: str
+    key: str
+    title: str
+
+@app.post("/api/summarize")
+async def summarize_article(req: SummarizeRequest):
+    load_dotenv(dotenv_path=ENV_PATH, override=True)
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+    
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Gemini API Key가 설정되지 않았습니다. 설정 편집 탭에서 등록해 주세요.")
+        
+    url = ""
+    crawler = req.crawler
+    key = req.key
+    
+    if crawler == "ZDNet" or crawler == "AVDBS":
+        url = key
+    elif crawler == "GeekNews":
+        parts = key.split(":")
+        if len(parts) >= 2:
+            topic_id = parts[1]
+            url = f"https://news.hada.io/topic?id={topic_id}"
+    elif crawler == "EtoLand":
+        parts = key.split(":")
+        if len(parts) >= 3:
+            bo_table = parts[1]
+            wr_id = parts[2]
+            url = f"https://www.etoland.co.kr/bbs/board.php?bo_table={bo_table}&wr_id={wr_id}"
+    elif crawler.startswith("Custom"):
+        parts = key.split(":", 2)
+        if len(parts) >= 3:
+            url = parts[2]
+            
+    if not url or not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="해당 항목의 원본 URL을 해석할 수 없습니다.")
+        
+    try:
+        text = await asyncio.to_thread(extract_text_from_url, url)
+    except Exception as e:
+        logger.error(f"본문 추출 중 오류 발생 (URL: {url}): {e}")
+        raise HTTPException(status_code=500, detail=f"웹페이지 본문을 가져오지 못했습니다: {e}")
+        
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="웹페이지에서 요약할 본문 텍스트를 추출할 수 없습니다.")
+        
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    prompt = (
+        f"당신은 유용한 AI 크롤러 요약 비서입니다. 아래 제공되는 웹페이지 텍스트를 분석하여 핵심 내용을 한글로 요약해주세요.\n\n"
+        f"제목: {req.title}\n"
+        f"주소: {url}\n\n"
+        f"요약 지침:\n"
+        f"1. 핵심 내용 위주로 요약하고, 읽기 쉽게 개조식(bullet points)으로 작성해주세요.\n"
+        f"2. 전체 3~5줄 분량으로 한국어로 명확하게 번역 및 요약해주세요.\n"
+        f"3. 텍스트가 부족하거나 불완전해도 최대한 유추해서 요약해주세요.\n\n"
+        f"텍스트 내용:\n{text}"
+    )
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    try:
+        def call_gemini():
+            return requests.post(api_url, json=payload, timeout=30)
+            
+        r = await asyncio.to_thread(call_gemini)
+        if r.status_code != 200:
+            logger.error(f"Gemini API 호출 에러: {r.status_code} {r.text}")
+            err_detail = "API 호출 실패"
+            try:
+                err_detail = r.json().get("error", {}).get("message", r.text)
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail=f"Gemini API 에러: {err_detail}")
+            
+        res_json = r.json()
+        candidates = res_json.get("candidates", [])
+        if not candidates:
+            raise HTTPException(status_code=500, detail="Gemini API 응답 결과가 비어 있습니다.")
+            
+        summary_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        if not summary_text:
+            raise HTTPException(status_code=500, detail="Gemini API 응답에서 텍스트를 파싱하지 못했습니다.")
+            
+        return {"summary": summary_text.strip()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Gemini API 호출 중 예외 발생: {e}")
+        raise HTTPException(status_code=500, detail=f"AI 요약 실행 중 예외 발생: {e}")
